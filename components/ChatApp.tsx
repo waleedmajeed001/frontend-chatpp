@@ -29,6 +29,7 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [onlineUsers, setOnlineUsers] = useState<User[]>([]);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
   const [activeFilter, setActiveFilter] = useState<string>("");
   const [input, setInput] = useState("");
   const [isConnected, setIsConnected] = useState(false);
@@ -37,29 +38,52 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
 
   useEffect(() => {
     fetchUserProfile();
+    fetchAllUsers();
   }, [token]);
 
   useEffect(() => {
     if (!user) return;
+    
+    console.log("Connecting WebSocket for user:", user.username);
     const ws = new WebSocket(`ws://localhost:8000/ws/chat?token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
 
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
-    ws.onerror = () => setIsConnected(false);
+    ws.onopen = () => {
+      console.log("WebSocket connected for user:", user.username);
+      setIsConnected(true);
+    };
+    ws.onclose = (event) => {
+      console.log("WebSocket disconnected for user:", user.username, "Code:", event.code, "Reason:", event.reason);
+      setIsConnected(false);
+    };
+    ws.onerror = (error) => {
+      console.error("WebSocket error for user:", user.username, error);
+      setIsConnected(false);
+    };
 
     ws.onmessage = (event) => {
       try {
         const parsed: ServerEvent = JSON.parse(event.data);
+        console.log("WebSocket message received:", parsed);
+        
         if (parsed.type === "boot") {
+          console.log("Boot data:", parsed.data);
           setMessages(parsed.data.messages || []);
           setOnlineUsers(parsed.data.online_users || []);
         } else if (parsed.type === "message") {
+          console.log("New message:", parsed.data);
           setMessages((prev) => [...prev, parsed.data]);
         } else if (parsed.type === "online_users") {
+          console.log("Online users update:", parsed.data);
+          console.log("Current online users count:", parsed.data?.length || 0);
           setOnlineUsers(parsed.data || []);
+        } else if (parsed.type === "error") {
+          console.error("Server error:", parsed.data);
+        } else {
+          console.log("Unknown message type:", parsed.type);
         }
-      } catch (_) {
+      } catch (error) {
+        console.error("Error parsing WebSocket message:", error, event.data);
         // Support plain text broadcast fallback
         const asText = String(event.data || "");
         if (asText.trim().length > 0) {
@@ -106,6 +130,23 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
     }
   };
 
+  const fetchAllUsers = async () => {
+    try {
+      const response = await fetch("http://localhost:8000/auth/users", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const usersData = await response.json();
+        setAllUsers(usersData);
+      }
+    } catch (error) {
+      console.error("Error fetching all users:", error);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("authToken");
     try { wsRef.current?.close(); } catch {}
@@ -127,6 +168,10 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
   };
 
   const isOwn = (m: ChatMessage) => m.user.email === user?.email;
+
+  const isUserOnline = (userEmail: string) => {
+    return onlineUsers.some(onlineUser => onlineUser.email === userEmail);
+  };
 
   const formatTime = (iso: string) => {
     try {
@@ -181,7 +226,7 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
         {/* Sidebar */}
         <aside className="hidden md:flex md:col-span-4 lg:col-span-3 border-r border-gray-200 dark:border-gray-800 flex-col bg-white dark:bg-gray-900">
           <div className="p-4 border-b border-gray-200 dark:border-gray-800">
-            <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">Messages</div>
+            <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">Users</div>
             <div className="mt-3 relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                 <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-4.35-4.35M10 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z" /></svg>
@@ -189,15 +234,15 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
               <input
                 value={activeFilter}
                 onChange={(e) => setActiveFilter(e.target.value)}
-                placeholder="Search"
+                placeholder="Search users..."
                 className="w-full pl-9 pr-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
           </div>
           <div className="p-2 overflow-y-auto">
-            <div className="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400 px-2 py-2">Online</div>
+            <div className="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400 px-2 py-2">All Users</div>
             <div className="space-y-1">
-              {onlineUsers
+              {allUsers
                 .filter((u) =>
                   `${u.username} ${u.email}`.toLowerCase().includes(activeFilter.toLowerCase())
                 )
@@ -207,17 +252,21 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
                       <div className="h-9 w-9 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center text-gray-700 dark:text-gray-200">
                         {u.username?.[0]?.toUpperCase()}
                       </div>
+                      {isUserOnline(u.email) && (
                       <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-green-500 ring-2 ring-white dark:ring-gray-900"></span>
+                      )}
                     </div>
                     <div className="min-w-0">
                       <div className="text-sm text-gray-900 dark:text-gray-100 truncate">{u.username}</div>
                       <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{u.email}</div>
                     </div>
-                    <div className="ml-auto text-[10px] text-gray-400">online</div>
+                    <div className="ml-auto text-[10px] text-gray-400">
+                      {isUserOnline(u.email) ? "online" : "offline"}
+                    </div>
                   </div>
                 ))}
-              {onlineUsers.length === 0 && (
-                <div className="px-2 py-3 text-sm text-gray-500 dark:text-gray-400">No users online</div>
+              {allUsers.length === 0 && (
+                <div className="px-2 py-3 text-sm text-gray-500 dark:text-gray-400">No users found</div>
               )}
             </div>
           </div>
@@ -231,7 +280,7 @@ export default function ChatApp({ token, onLogout }: ChatAppProps) {
               <div className="h-8 w-8 rounded-full bg-blue-600 text-white flex items-center justify-center">G</div>
               <div>
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">General Chat</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{onlineUsers.length} online</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">{onlineUsers.length} online • {allUsers.length} total</div>
               </div>
             </div>
             <div className="hidden sm:flex items-center gap-2 text-gray-500 dark:text-gray-400">
